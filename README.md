@@ -29,13 +29,13 @@ The typical workflow is: define the images and configs you want to offer, then l
 ### 1. Apply CRDs
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.3.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/crds.json
 ```
 
 ### 2. Deploy the operator
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.3.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/operator.yaml
 ```
 
 > The operator image is pulled from Docker Hub at `gomomento/valkey-operator`.
@@ -298,13 +298,18 @@ spec:
       - us-east-1b
       - us-east-1c
     zoneSpread: required
+    nodeSelector:
+      node-pool: cache
 EOF
 ```
 
 - **`zones`** — restricts the cluster's pods to these availability zones. The operator enforces this with a required `nodeAffinity` on the `topology.kubernetes.io/zone` node label.
-- **`zoneSpread`** — controls how strictly each shard's nodes are kept in separate zones. For every shard, the operator attaches a Kubernetes `topologySpreadConstraint` to its pods (`maxSkew: 1` over `topology.kubernetes.io/zone`) so the shard's nodes spread across zones. `zoneSpread` selects that constraint's `whenUnsatisfiable` mode:
+- **`nodeSelector`** — a map of node labels passed through verbatim to the pods' `nodeSelector`. Use it to pin the cluster to a specific node pool. It composes with `zones` — Kubernetes ANDs `nodeSelector` with `nodeAffinity`, so a pod must satisfy both the selector labels and (if set) the zone restriction.
+- **`zoneSpread`** — controls how strictly each shard's nodes are spread across zones. The operator attaches a per-shard zone `topologySpreadConstraint` (`maxSkew: 1` over `topology.kubernetes.io/zone`) to every pod; `zoneSpread` selects its `whenUnsatisfiable` mode:
   - **`bestEffort`** — `whenUnsatisfiable: ScheduleAnyway`. Spreading is a soft preference: the scheduler favors it when scoring nodes, but will colocate a shard's nodes in one zone when other factors (capacity, image locality) outweigh it.
   - **`required`** — `whenUnsatisfiable: DoNotSchedule`. The scheduler will not place a pod where it would put two of a shard's nodes in the same zone. If no node satisfies the constraint, the pod stays `Pending` until one does — for example, until the cluster autoscaler provisions a node in the needed zone. This guarantees a single-zone outage never takes out a whole shard, at the cost of pods waiting on capacity rather than colocating.
+
+  In `required` mode the operator additionally attaches a **cluster-wide** zone spread constraint, which keeps the *whole cluster* balanced across zones — per-shard spread alone doesn't ensure that, since every shard could split across the same two zones and leave a third empty. This constraint is always soft (`ScheduleAnyway`): Kubernetes permits only one hard zone spread constraint per pod, and the per-shard one holds it. So in `required` mode per-shard spread is guaranteed and cluster-wide balance is strongly preferred but not guaranteed.
 
 `zoneSpread` affects only zone spreading. The operator separately spreads each shard's pods across hosts (a `topologySpreadConstraint` over `kubernetes.io/hostname`); that one is always best-effort and `zoneSpread` does not change it.
 
@@ -352,8 +357,8 @@ kubectl -n valkey-operator logs deployment/valkey-operator
 Apply the updated CRDs and operator manifest:
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.3.0/crds.json
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.3.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/operator.yaml
 kubectl -n valkey-operator rollout status deployment/valkey-operator
 ```
 
@@ -361,17 +366,17 @@ kubectl -n valkey-operator rollout status deployment/valkey-operator
 
 ## Uninstall
 
-> These commands reference `v0.3.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+> These commands reference `v0.4.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
 
 ```bash
 # Remove all clusters across all namespaces (this deletes the Valkey pods)
 kubectl delete valkeycluster --all -A
 
 # Remove the operator
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.3.0/operator.yaml
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/operator.yaml
 
 # Remove CRDs — also deletes any remaining custom resources
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.3.0/crds.json
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/crds.json
 ```
 
 ---
