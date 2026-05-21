@@ -29,13 +29,13 @@ The typical workflow is: define the images and configs you want to offer, then l
 ### 1. Apply CRDs
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/crds.json
 ```
 
 ### 2. Deploy the operator
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/operator.yaml
 ```
 
 > The operator image is pulled from Docker Hub at `gomomento/valkey-operator`.
@@ -136,7 +136,7 @@ kubectl -n my-app patch valkeycluster my-cluster \
   --type merge -p '{"spec": {"replicasPerShard": 2}}'
 ```
 
-### Switch a cluster to a different config
+### Switch config
 
 Move a cluster to a different `ValkeyConfig` — for example to change its resource profile:
 
@@ -147,7 +147,7 @@ kubectl -n my-app patch valkeycluster my-cluster \
 
 The operator will perform a rolling upgrade to apply the new config.
 
-### Rolling image upgrade
+### Upgrade image
 
 Register a new `ValkeyImage` for the new version and point the config to it. The operator performs a rolling upgrade across every cluster that references the config:
 
@@ -277,6 +277,133 @@ kubectl -n my-app patch valkeycluster my-cluster --type merge -p '{
 }'
 ```
 
+### Enable TLS
+
+When TLS is enabled the cluster runs TLS-only: client traffic, replication, and the cluster bus are all encrypted. The plain port is closed.
+
+The operator does not manage certificates. Create a `kubernetes.io/tls` Secret in the cluster's namespace containing `tls.crt`, `tls.key`, and `ca.crt`. The certificate must include SANs covering `{cluster}.{namespace}.svc.cluster.local` and `*.{cluster}.{namespace}.svc.cluster.local`.
+
+Reference the Secret in `spec.tls.secretRef`:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: valkey.gomomento.com/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: my-cluster
+  namespace: my-app
+spec:
+  configRef: standard
+  shards: 3
+  replicasPerShard: 1
+  tls:
+    secretRef: my-cluster-tls
+EOF
+```
+
+Connect once the cluster is `Active` (from inside the cluster):
+
+```bash
+valkey-cli -h my-cluster.my-app.svc.cluster.local --tls --cacert ca.crt -p 6379 PING
+```
+
+**Cert rotation** — update the Secret's data; the operator reloads the new cert on all pods without a restart. For CA rotation, include both old and new CA PEM blocks in `ca.crt` during the transition, then remove the old CA once rotation is complete.
+
+> TLS cannot be enabled/disabled on an existing cluster, it must be set at creation time.
+
+### Provision certificates with cert-manager
+
+The operator consumes a `kubernetes.io/tls` Secret but does not create or renew it. In production the recommended way to produce and rotate that Secret is [cert-manager](https://cert-manager.io). cert-manager issues the certificate, writes it into a Secret in the right shape, and renews it automatically before expiry — and the operator reloads each renewal across the cluster without restarting pods.
+
+This requires cert-manager to be installed in the cluster (`kubectl get pods -n cert-manager` should show it running).
+
+**1. An issuer to sign the certificate.** If you already run a cert-manager `Issuer`/`ClusterIssuer` backed by your own CA or HashiCorp Vault, use it and skip to step 2. Otherwise create a self-signed CA dedicated to this cluster — a one-time bootstrap `SelfSigned` Issuer signs a long-lived CA, and a `CA` Issuer then signs the cluster's leaf certificates from it:
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-bootstrap
+  namespace: my-app
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: valkey-ca
+  namespace: my-app
+spec:
+  isCA: true
+  commonName: my-app-valkey-ca
+  secretName: valkey-ca-keypair
+  duration: 87600h   # 10y — keep the CA long-lived
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: valkey-ca-issuer
+  namespace: my-app
+spec:
+  ca:
+    secretName: valkey-ca-keypair
+EOF
+```
+
+> Use a private-CA issuer (`CA`, `SelfSigned`, or Vault) — not a public ACME issuer like Let's Encrypt. Two reasons: the certificate's SANs are internal `*.svc.cluster.local` names, and ACME can only issue for public domains you can prove control of via an HTTP/DNS challenge — there is nothing for it to validate in-cluster. A private CA issuer also populates `ca.crt` in the Secret, which the cluster needs to verify peer certificates on replication and the cluster bus; ACME issuers do not. Internal workload certificates like these are precisely the private-CA use case — the same pattern service meshes use for in-cluster mTLS.
+
+**2. A `Certificate` for the cluster.** Its `secretName` is the Secret the `ValkeyCluster` will reference. Two requirements are easy to miss:
+
+- **`dnsNames`** must list the cluster's two service SANs exactly — substitute your cluster name and namespace.
+- **`usages`** must include both `server auth` and `client auth`. Each node serves TLS to clients *and* opens TLS connections to its peers for replication and the cluster bus, so it acts as a TLS client too — a server-auth-only certificate causes peer connections to fail.
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-cluster-tls
+  namespace: my-app
+spec:
+  secretName: my-cluster-tls
+  duration: 2160h     # 90d
+  renewBefore: 360h   # 15d
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - my-cluster.my-app.svc.cluster.local
+    - "*.my-cluster.my-app.svc.cluster.local"
+  issuerRef:
+    name: valkey-ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+EOF
+```
+
+**3. Point the cluster at the Secret.** Set `spec.tls.secretRef` to the same name as `secretName` above (see [Enable TLS](#enable-tls)):
+
+```yaml
+spec:
+  tls:
+    secretRef: my-cluster-tls
+```
+
+**Renewal is automatic.** cert-manager renews the leaf before expiry (per `renewBefore`) and rewrites the same Secret in place; the operator reloads the new certificate on every node with no restart and no dropped connections. Because leaf renewal keeps the same CA, no extra coordination is needed — keep the CA itself long-lived so it does not rotate underneath the running cluster. To rotate the CA, follow the bundle procedure under [Enable TLS](#enable-tls).
+
 ### Zone-aware placement
 
 Pin a cluster to specific availability zones, and control how strictly each shard's nodes are spread across them:
@@ -357,8 +484,8 @@ kubectl -n valkey-operator logs deployment/valkey-operator
 Apply the updated CRDs and operator manifest:
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/crds.json
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/operator.yaml
 kubectl -n valkey-operator rollout status deployment/valkey-operator
 ```
 
@@ -366,17 +493,17 @@ kubectl -n valkey-operator rollout status deployment/valkey-operator
 
 ## Uninstall
 
-> These commands reference `v0.4.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+> These commands reference `v0.5.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
 
 ```bash
 # Remove all clusters across all namespaces (this deletes the Valkey pods)
 kubectl delete valkeycluster --all -A
 
 # Remove the operator
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/operator.yaml
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/operator.yaml
 
 # Remove CRDs — also deletes any remaining custom resources
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.4.0/crds.json
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/crds.json
 ```
 
 ---
