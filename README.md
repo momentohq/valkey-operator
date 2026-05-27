@@ -29,13 +29,13 @@ The typical workflow is: define the images and configs you want to offer, then l
 ### 1. Apply CRDs
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/crds.json
 ```
 
 ### 2. Deploy the operator
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/operator.yaml
 ```
 
 > The operator image is pulled from Docker Hub at `gomomento/valkey-operator`.
@@ -442,6 +442,37 @@ EOF
 
 `zoneSpread` is optional. When omitted, it inherits the operator-wide default — `bestEffort`, unless changed in [operator configuration](#operator-configuration).
 
+#### Changing placement on a running cluster
+
+`zones` and `nodeSelector` are **hard constraints** — they pin pods to nodes, so the only way to honor a change is to move the pods. Editing either triggers a **rolling replacement**: the operator replaces every pod, one shard at a time, with a pod that satisfies the new constraints. It always brings up a replacement and (for primaries) fails over to it *before* retiring the old pod, so the rollout is non-disruptive to availability — but it does incur a failover per shard, like an image upgrade.
+
+> **Heads up:** if the new placement is unsatisfiable (e.g. a `nodeSelector` no node matches, or a zone with no capacity), the replacement pod stays `Pending` and the rollout stalls on that shard. Existing pods are left running and serving — no data is lost — and the rollout resumes on its own once a matching node is available (for example, after the cluster autoscaler provisions one).
+
+`zoneSpread`, by contrast, is a soft scheduler preference, so changing it does **not** replace existing pods — the new mode applies only to pods created afterward (during a later scale-up, upgrade, or replacement).
+
+### Pod annotations
+
+`spec.podAnnotations` is a map of annotations the operator applies verbatim to every Pod it creates for the cluster. Use it for tooling that reads pod annotations — metrics scrape configuration, service-mesh sidecar injection, cost-allocation tags, and the like.
+
+```yaml
+apiVersion: valkey.gomomento.com/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: my-cluster
+spec:
+  configRef: my-config
+  shards: 3
+  replicasPerShard: 1
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "6379"
+```
+
+- The annotations land on the Pods only, not on the operator's other resources (Services, ConfigMaps, Secrets).
+- Keys under the operator's own `valkey.gomomento.com/` prefix are reserved; the CRD rejects them at apply time.
+- Editing `podAnnotations` is reconciled onto existing pods in place — the operator patches the new and changed keys onto live pods without recreating them, so changes propagate without a rolling restart. Annotations set on the pods by other controllers are left untouched.
+- **Removing** a key from `podAnnotations` does not strip it from running pods — on a live pod the operator can't tell its own annotation from one another controller added. Removals take effect when a pod is next replaced (for example, during an image upgrade or node replacement).
+
 ---
 
 ## Operator configuration
@@ -484,8 +515,8 @@ kubectl -n valkey-operator logs deployment/valkey-operator
 Apply the updated CRDs and operator manifest:
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/crds.json
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/operator.yaml
 kubectl -n valkey-operator rollout status deployment/valkey-operator
 ```
 
@@ -493,17 +524,17 @@ kubectl -n valkey-operator rollout status deployment/valkey-operator
 
 ## Uninstall
 
-> These commands reference `v0.5.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+> These commands reference `v0.6.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
 
 ```bash
 # Remove all clusters across all namespaces (this deletes the Valkey pods)
 kubectl delete valkeycluster --all -A
 
 # Remove the operator
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/operator.yaml
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/operator.yaml
 
 # Remove CRDs — also deletes any remaining custom resources
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.5.0/crds.json
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/crds.json
 ```
 
 ---
