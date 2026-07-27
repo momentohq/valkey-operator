@@ -19,7 +19,8 @@ The typical workflow is: define the images and configs you want to offer, then l
 
 ## Prerequisites
 
-- Kubernetes 1.26+
+- Kubernetes 1.27+
+- Valkey 9.1.0 or newer (older image versions are rejected)
 - `kubectl` configured against your cluster
 
 ---
@@ -29,13 +30,13 @@ The typical workflow is: define the images and configs you want to offer, then l
 ### 1. Apply CRDs
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/crds.json
 ```
 
 ### 2. Deploy the operator
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/operator.yaml
 ```
 
 > The operator image is pulled from Docker Hub at `gomomento/valkey-operator`.
@@ -59,13 +60,23 @@ kubectl apply -f - <<'EOF'
 apiVersion: valkey.gomomento.com/v1alpha1
 kind: ValkeyImage
 metadata:
-  name: valkey-9-0
+  name: valkey-9-1
 spec:
   repository: valkey/valkey
-  tag: "9.0.0"
-  version: "9.0.0"
+  tag: "9.1.0"
+  version: "9.1.0"
 EOF
 ```
+
+`version` must be full `MAJOR.MINOR.PATCH` and at least `9.1.0` — older
+versions are rejected at admission. The operator also verifies the running
+binary against the version floor before a node joins a cluster, so an image
+whose `version` field doesn't match its actual binary is caught at
+provisioning time (the cluster reports `Failed` with an explanation).
+
+A `ValkeyImage` that is still referenced by a `ValkeyConfig` is protected
+from deletion: `kubectl delete valkeyimage` marks it for deletion, but it
+is only released once the last referencing config is gone.
 
 ### 2. Create a configuration
 
@@ -78,7 +89,7 @@ kind: ValkeyConfig
 metadata:
   name: standard
 spec:
-  imageRef: valkey-9-0
+  imageRef: valkey-9-1
   resources:
     cpu: "1"
     memory: "2Gi"
@@ -87,6 +98,11 @@ spec:
     maxmemory-policy: "allkeys-lru"
 EOF
 ```
+
+The `valkey` map takes ordinary `valkey.conf` settings. Settings the
+operator manages for cluster integrity — authentication (`requirepass`,
+`primaryauth`, …), ACLs (`aclfile`, `user`), TLS (`tls-*`), and `include` —
+are rejected at admission.
 
 ### 3. Provision a cluster
 
@@ -136,6 +152,60 @@ kubectl -n my-app patch valkeycluster my-cluster \
   --type merge -p '{"spec": {"replicasPerShard": 2}}'
 ```
 
+### Autoscaling
+
+Instead of scaling shards by hand, let the operator scale them from live
+utilization. Autoscaling is off unless `spec.autoscaling` is set:
+
+```yaml
+spec:
+  configRef: standard
+  shards: 3            # initial count only while autoscaling is enabled
+  replicasPerShard: 1
+  autoscaling:
+    minShards: 3
+    maxShards: 12
+    scaleOut:               # opt into any combination of triggers
+      memoryPercent: 80     # % of maxmemory (or the container memory limit)
+      cpuPercent: 75        # % of the container CPU limit
+      bandwidthMbps: 800    # absolute node throughput, in + out
+    scaleIn:                # optional — omit to never scale in
+      memoryPercent: 40
+      cpuPercent: 30
+```
+
+**How it decides.** The operator samples utilization from every node every
+30 seconds (visible on each ValkeyNode's status). If any primary's latest
+sample is over any `scaleOut` threshold, one shard is added (replicas
+don't trigger scale-out — their memory mirrors the primary's, and resync
+spikes don't indicate keyspace pressure — but a busy replica still blocks
+scale-in). If every
+node's **peak** utilization over a sliding window (`scaleInWindowSeconds`,
+default 300) stays under every `scaleIn` threshold, one shard is removed —
+a momentary lull during a busy period won't shed capacity, and a
+freshly-added node blocks scale-in until it has a full window of history.
+Decisions are only made when the cluster is fully converged (no joins,
+leaves, or slot migrations in flight), and each direction has a cooldown
+(`scaleOutCooldownSeconds`, default 180; `scaleInCooldownSeconds`, default
+900).
+
+**What to watch.** While autoscaling is enabled, `spec.shards` is only the
+initial count — `minShards`/`maxShards` are the levers. The current target
+is published at `status.autoscaling.desiredShards` (the `DESIRED SHARDS`
+column in `kubectl get valkeyclusters`), and every decision is emitted as
+a Kubernetes Event on the cluster:
+
+```bash
+kubectl -n my-app get events --field-selector reason=ScaleOut
+# ScaleOut  1 -> 2 shards: node my-cluster-a1b2c memory 84.2% >= 80%
+```
+
+Thresholds are validated at admission: `maxShards >= minShards`, and each
+`scaleIn` threshold must be below its `scaleOut` counterpart. Percentage
+triggers need a computable denominator — `memoryPercent` uses `maxmemory`
+when the config sets one (otherwise the container memory limit), and
+`cpuPercent` requires a CPU limit in the config.
+
 ### Switch config
 
 Move a cluster to a different `ValkeyConfig` — for example to change its resource profile:
@@ -157,16 +227,16 @@ kubectl apply -f - <<'EOF'
 apiVersion: valkey.gomomento.com/v1alpha1
 kind: ValkeyImage
 metadata:
-  name: valkey-9-0-1
+  name: valkey-9-1-1
 spec:
   repository: valkey/valkey
-  tag: "9.0.1"
-  version: "9.0.1"
+  tag: "9.1.1"
+  version: "9.1.1"
 EOF
 
 # Update the config to point to the new image
 kubectl patch valkeyconfig standard \
-  --type merge -p '{"spec": {"imageRef": "valkey-9-0-1"}}'
+  --type merge -p '{"spec": {"imageRef": "valkey-9-1-1"}}'
 ```
 
 All clusters using `standard` config will begin a rolling upgrade immediately.
@@ -182,7 +252,7 @@ kind: ValkeyConfig
 metadata:
   name: base
 spec:
-  imageRef: valkey-9-0
+  imageRef: valkey-9-1
   valkey:
     maxmemory-policy: "allkeys-lru"
 ---
@@ -498,15 +568,30 @@ A `placement.zoneSpread` set on an individual `ValkeyCluster` always overrides t
 ## Check cluster status
 
 ```bash
-# Overall state (Creating / Active / Updating)
+# Overall state
 kubectl -n my-app get valkeycluster
 
-# Full status including pod list
+# Full status including pod list, message, and conditions
 kubectl -n my-app describe valkeycluster my-cluster
 
 # Operator logs
 kubectl -n valkey-operator logs deployment/valkey-operator
 ```
+
+### States
+
+| State | Meaning |
+|---|---|
+| `Creating` | Bootstrap in progress. The spec is frozen until the cluster reaches `Active` — edits are rejected at admission. |
+| `Active` | The cluster is formed and serving. |
+| `Updating` | A rolling change (upgrade, scale, reshard) is in progress. |
+| `Invalid` | A running cluster hit a recoverable problem — most commonly a broken or expired TLS Secret. `status.message` explains what's wrong. Fix the underlying issue (correct or rotate the Secret) and the cluster returns to `Active` on its own; no need to recreate it. Never entered during creation. |
+| `Failed` | Terminal: the cluster could not be created — for example, its TLS Secret is missing or invalid, or the image's binary is older than the supported Valkey version floor. `status.message` explains; delete and recreate the cluster to retry. Prerequisites like TLS Secrets must exist and be valid before the cluster is created. |
+
+For TLS clusters, the operator also maintains a `CertificateExpiringSoon`
+condition in `status.conditions`: it turns `True` when the cert is within
+30 days of expiry (the cluster stays `Active`). Alert on it to catch
+rotations before they lapse.
 
 ---
 
@@ -515,8 +600,8 @@ kubectl -n valkey-operator logs deployment/valkey-operator
 Apply the updated CRDs and operator manifest:
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/crds.json
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/operator.yaml
 kubectl -n valkey-operator rollout status deployment/valkey-operator
 ```
 
@@ -524,17 +609,17 @@ kubectl -n valkey-operator rollout status deployment/valkey-operator
 
 ## Uninstall
 
-> These commands reference `v0.6.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+> These commands reference `v0.7.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
 
 ```bash
 # Remove all clusters across all namespaces (this deletes the Valkey pods)
 kubectl delete valkeycluster --all -A
 
 # Remove the operator
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/operator.yaml
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/operator.yaml
 
 # Remove CRDs — also deletes any remaining custom resources
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.6.0/crds.json
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/crds.json
 ```
 
 ---
