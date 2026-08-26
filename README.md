@@ -20,7 +20,7 @@ The typical workflow is: define the images and configs you want to offer, then l
 ## Prerequisites
 
 - Kubernetes 1.27+
-- Valkey 9.1.0 or newer (older image versions are rejected)
+- Valkey 9.0.1 or newer (older image versions are rejected)
 - `kubectl` configured against your cluster
 
 ---
@@ -30,13 +30,13 @@ The typical workflow is: define the images and configs you want to offer, then l
 ### 1. Apply CRDs
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/crds.json
 ```
 
 ### 2. Deploy the operator
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/operator.yaml
 ```
 
 > The operator image is pulled from Docker Hub at `gomomento/valkey-operator`.
@@ -60,15 +60,15 @@ kubectl apply -f - <<'EOF'
 apiVersion: valkey.gomomento.com/v1alpha1
 kind: ValkeyImage
 metadata:
-  name: valkey-9-1
+  name: valkey-9-0-1
 spec:
   repository: valkey/valkey
-  tag: "9.1.0"
-  version: "9.1.0"
+  tag: "9.0.1"
+  version: "9.0.1"
 EOF
 ```
 
-`version` must be full `MAJOR.MINOR.PATCH` and at least `9.1.0` — older
+`version` must be full `MAJOR.MINOR.PATCH` and at least `9.0.1` — older
 versions are rejected at admission. The operator also verifies the running
 binary against the version floor before a node joins a cluster, so an image
 whose `version` field doesn't match its actual binary is caught at
@@ -89,7 +89,7 @@ kind: ValkeyConfig
 metadata:
   name: standard
 spec:
-  imageRef: valkey-9-1
+  imageRef: valkey-9-0-1
   resources:
     cpu: "1"
     memory: "2Gi"
@@ -227,16 +227,16 @@ kubectl apply -f - <<'EOF'
 apiVersion: valkey.gomomento.com/v1alpha1
 kind: ValkeyImage
 metadata:
-  name: valkey-9-1-1
+  name: valkey-9-0-2
 spec:
   repository: valkey/valkey
-  tag: "9.1.1"
-  version: "9.1.1"
+  tag: "9.0.2"
+  version: "9.0.2"
 EOF
 
 # Update the config to point to the new image
 kubectl patch valkeyconfig standard \
-  --type merge -p '{"spec": {"imageRef": "valkey-9-1-1"}}'
+  --type merge -p '{"spec": {"imageRef": "valkey-9-0-2"}}'
 ```
 
 All clusters using `standard` config will begin a rolling upgrade immediately.
@@ -252,7 +252,7 @@ kind: ValkeyConfig
 metadata:
   name: base
 spec:
-  imageRef: valkey-9-1
+  imageRef: valkey-9-0-1
   valkey:
     maxmemory-policy: "allkeys-lru"
 ---
@@ -600,8 +600,8 @@ rotations before they lapse.
 Apply the updated CRDs and operator manifest:
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/crds.json
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/operator.yaml
 kubectl -n valkey-operator rollout status deployment/valkey-operator
 ```
 
@@ -609,17 +609,17 @@ kubectl -n valkey-operator rollout status deployment/valkey-operator
 
 ## Uninstall
 
-> These commands reference `v0.7.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+> These commands reference `v0.8.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
 
 ```bash
 # Remove all clusters across all namespaces (this deletes the Valkey pods)
 kubectl delete valkeycluster --all -A
 
 # Remove the operator
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/operator.yaml
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/operator.yaml
 
 # Remove CRDs — also deletes any remaining custom resources
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.7.0/crds.json
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/crds.json
 ```
 
 ---
