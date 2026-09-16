@@ -4,7 +4,7 @@ A Kubernetes operator for managing [Valkey](https://valkey.io/) clusters. It han
 
 ## How it works
 
-The operator introduces four custom resource types:
+The operator introduces five custom resource types:
 
 | Resource | Scope | Purpose |
 |---|---|---|
@@ -12,6 +12,7 @@ The operator introduces four custom resource types:
 | `ValkeyConfig` | Cluster | Named configuration bundles (image, resources, Valkey settings) |
 | `ValkeyRole` | Cluster | Reusable command permission sets for ACLs |
 | `ValkeyCluster` | Namespace | Provisions a cluster by referencing a config and specifying topology |
+| `ValkeyMeteringRecord` | Namespace | Records a cluster's provisioned memory over time, for billing. Written by the operator in its own namespace — see [Usage metering](#usage-metering) |
 
 The typical workflow is: define the images and configs you want to offer, then let teams provision clusters by creating `ValkeyCluster` resources in their namespaces.
 
@@ -30,13 +31,13 @@ The typical workflow is: define the images and configs you want to offer, then l
 ### 1. Apply CRDs
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/crds.json
 ```
 
 ### 2. Deploy the operator
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/operator.yaml
 ```
 
 > The operator image is pulled from Docker Hub at `gomomento/valkey-operator`.
@@ -565,6 +566,42 @@ A `placement.zoneSpread` set on an individual `ValkeyCluster` always overrides t
 
 ---
 
+## Usage metering
+
+The operator records how much memory each cluster has provisioned over time, as GB-hours, in a `ValkeyMeteringRecord`. Momento bills from these records — you export them and send them in; nothing is transmitted anywhere automatically.
+
+Records live in the operator's namespace — one for each Valkey cluster — and are kept after that cluster is deleted.
+
+### How memory is determined
+
+A node is metered whether or not you set a memory limit. The first of these that applies wins:
+
+| Source | Used when |
+|---|---|
+| `Reserved` | The config sets `resources.memory` — the capacity actually reserved for the pod. |
+| `MaxMemory` | No container limit, but the config sets `maxmemory`. |
+| `Observed` | Neither is set, so the peak memory the node was seen holding is used instead. |
+| `Floor` | The figure is below the per-node minimum of 100 MB, or the node has no measurements yet. |
+
+### Export
+
+```bash
+kubectl get valkeymeteringrecords -n valkey-operator -o json > usage.json
+```
+
+### Deletion is protected
+
+Records hold a finalizer, so `kubectl delete` on one is accepted but does not complete. Confirm with an annotation once you have exported it:
+
+```bash
+kubectl annotate valkeymeteringrecord <name> -n valkey-operator \
+  valkey.gomomento.com/release=true
+```
+
+A record for a deleted cluster cannot be reconstructed — nothing recreates it — so export before releasing.
+
+---
+
 ## Check cluster status
 
 ```bash
@@ -600,8 +637,8 @@ rotations before they lapse.
 Apply the updated CRDs and operator manifest:
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/crds.json
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/operator.yaml
 kubectl -n valkey-operator rollout status deployment/valkey-operator
 ```
 
@@ -609,18 +646,29 @@ kubectl -n valkey-operator rollout status deployment/valkey-operator
 
 ## Uninstall
 
-> These commands reference `v0.8.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+> These commands reference `v0.9.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+
+Metering records hold a finalizer, so they must be exported and released before the operator can be removed. Do this in order — releasing while clusters still exist would let the operator recreate the records, and releasing after the operator is gone leaves nothing to process the annotation.
 
 ```bash
 # Remove all clusters across all namespaces (this deletes the Valkey pods)
 kubectl delete valkeycluster --all -A
 
+# Export the metering records — this is your only copy
+kubectl get valkeymeteringrecords -n valkey-operator -o json > usage-final.json
+
+# Release the records for deletion, with the operator still running
+kubectl annotate valkeymeteringrecords -n valkey-operator --all \
+  valkey.gomomento.com/release=true
+
 # Remove the operator
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/operator.yaml
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/operator.yaml
 
 # Remove CRDs — also deletes any remaining custom resources
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.8.0/crds.json
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/crds.json
 ```
+
+The release step issues one request per record, so on a large fleet it can take a few minutes. It is safe to re-run.
 
 ---
 
