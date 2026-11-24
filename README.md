@@ -31,13 +31,13 @@ The typical workflow is: define the images and configs you want to offer, then l
 ### 1. Apply CRDs
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.10.0/crds.json
 ```
 
 ### 2. Deploy the operator
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.10.0/operator.yaml
 ```
 
 > The operator image is pulled from Docker Hub at `gomomento/valkey-operator`.
@@ -637,8 +637,8 @@ rotations before they lapse.
 Apply the updated CRDs and operator manifest:
 
 ```bash
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/crds.json
-kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/operator.yaml
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.10.0/crds.json
+kubectl apply -f https://github.com/momentohq/valkey-operator/releases/download/v0.10.0/operator.yaml
 kubectl -n valkey-operator rollout status deployment/valkey-operator
 ```
 
@@ -646,7 +646,7 @@ kubectl -n valkey-operator rollout status deployment/valkey-operator
 
 ## Uninstall
 
-> These commands reference `v0.9.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+> These commands reference `v0.10.0`. If you installed a different version, use that one instead — check the deployed tag with `kubectl -n valkey-operator get deployment valkey-operator -o jsonpath='{.spec.template.spec.containers[0].image}'`.
 
 Metering records hold a finalizer, so they must be exported and released before the operator can be removed. Do this in order — releasing while clusters still exist would let the operator recreate the records, and releasing after the operator is gone leaves nothing to process the annotation.
 
@@ -662,10 +662,10 @@ kubectl annotate valkeymeteringrecords -n valkey-operator --all \
   valkey.gomomento.com/release=true
 
 # Remove the operator
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/operator.yaml
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.10.0/operator.yaml
 
 # Remove CRDs — also deletes any remaining custom resources
-kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.9.0/crds.json
+kubectl delete -f https://github.com/momentohq/valkey-operator/releases/download/v0.10.0/crds.json
 ```
 
 The release step issues one request per record, so on a large fleet it can take a few minutes. It is safe to re-run.
